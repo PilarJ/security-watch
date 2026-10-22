@@ -1,0 +1,24 @@
+{
+  "repos": [
+    {
+      "repo": "your-user/web-app",
+      "renovate": true,
+      "security_scan": true,
+      "ai_fix": "auto"
+    },
+    {
+      "repo": "your-org/api",
+      "renovate": true,
+      "security_scan": true,
+      "ai_fix": "on_label",
+      "semgrep_configs": ["p/default", "p/secrets", "p/python"],
+      "ai_allowed_commands": ["pytest"]
+    },
+    {
+      "repo": "your-user/legacy-site",
+      "renovate": true,
+      "security_scan": false,
+      "ai_fix": "off"
+    }
+  ]
+}
