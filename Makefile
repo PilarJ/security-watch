@@ -4,7 +4,7 @@ COMPOSE ?= docker compose
 .PHONY: help setup check up down restart logs status scan scan-now test-notify renovate update self-update autoupdate autoupdate-off autostart
 
 help: ## List available commands
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  First run:  make setup  ->  edit .env and repos.json  ->  make up  ->  make autostart  ->  make autoupdate"
 
