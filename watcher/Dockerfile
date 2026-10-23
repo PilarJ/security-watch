@@ -1,5 +1,7 @@
 FROM ghcr.io/google/osv-scanner:v2.7.0 AS osv
 FROM composer:2 AS composer
+# Pinned by digest (Trivy release artifacts were compromised in March 2026, CVE-2026-33634).
+FROM ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c AS trivy
 
 FROM node:22-bookworm-slim
 
@@ -19,6 +21,7 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.308 && npm cache clean --force
 
 COPY --from=osv /osv-scanner /usr/local/bin/osv-scanner
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY watch.py /app/watch.py
 
 USER node

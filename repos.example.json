@@ -4,14 +4,16 @@
       "repo": "your-user/web-app",
       "renovate": true,
       "security_scan": true,
-      "ai_fix": "auto"
+      "ai_fix": "auto",
+      "trivy_images": ["ghcr.io/your-user/web-app:latest"]
     },
     {
       "repo": "your-org/api",
       "renovate": true,
       "security_scan": true,
       "ai_fix": "on_label",
-      "semgrep_configs": ["p/default", "p/secrets", "p/python"],
+      "ai_language": "German",
+      "semgrep_configs": ["p/default", "p/python"],
       "ai_allowed_commands": ["pytest"]
     },
     {

@@ -7,16 +7,30 @@ Runs as two Docker containers on any machine (a home server, a Mac mini, a VPS).
 | Service | What it does |
 |---|---|
 | **renovate** | [Renovate](https://docs.renovatebot.com/) runs every hour. It opens PRs for dependency updates (minor/patch grouped into one PR, at night on weekdays) and **immediately** opens separate PRs for security fixes. Major versions wait for approval in the *Dependency Dashboard* issue. |
-| **watcher** | Once a day it clones each repo and scans it with [osv-scanner](https://github.com/google/osv-scanner) (vulnerable dependencies) and [semgrep](https://semgrep.dev/) (vulnerable code, severity ERROR by default). Findings become issues labelled `security-watch`, and resolved findings are closed automatically. Depending on configuration it runs Claude Code to fix a finding and open a PR. |
+| **watcher** | Once a day it clones each repo and scans it with [osv-scanner](https://github.com/google/osv-scanner) (vulnerable dependencies), [semgrep](https://semgrep.dev/) (vulnerable code) and [Trivy](https://trivy.dev/) (Dockerfile/Kubernetes/Terraform misconfigurations, leaked secrets and, optionally, published container images). Findings become issues labelled `security-watch`, and resolved findings are closed automatically. Depending on configuration it runs Claude Code to fix a finding and open a PR. |
 
 AI never merges anything. Every PR goes through your review.
 
 Optional **Slack** and **Telegram** notifications tell you when something needs attention.
 
+## What gets scanned
+
+| Scanner | Finds | Issue title example |
+|---|---|---|
+| osv-scanner | vulnerable dependencies in lockfiles | `[security] [CVSS 9.8 critical] Vulnerable dependency guzzlehttp/guzzle 6.5.0 (GHSA-…)` |
+| semgrep | injection, XSS, eval, insecure crypto… in your code | `[security] [high] tainted-sql-string in src/Repo.php:42` |
+| Trivy fs | IaC misconfigurations (Dockerfile, compose, k8s, Terraform, Helm) and secrets | `[security] [critical] Secret (GitHub Personal Access Token) in config.php:4` |
+| Trivy image | OS and library packages inside your published images, end-of-life base OS | `[security] [CVSS 9.1 critical] openssl 3.0.2 in image app:latest (CVE-…)` |
+
+Issue titles start with the CVSS score and rating (critical ≥ 9.0, high ≥ 7.0, medium ≥ 4.0) where a score exists, otherwise with the scanner's severity. Titles of open issues are updated when the score changes, so you can sort and filter by severity directly on GitHub.
+
+Trivy image scanning pulls images from the registry. For private images set `TRIVY_USERNAME`/`TRIVY_PASSWORD` (for GHCR: your username and `GITHUB_TOKEN`). Trivy is pinned by digest, because Trivy release artifacts were compromised in March 2026 ([CVE-2026-33634](https://nvd.nist.gov/vuln/detail/CVE-2026-33634)).
+
 ## Supported stacks
 
 - **Renovate** supports 90+ package managers (npm, composer, pip/poetry, Go modules, Maven/Gradle, Cargo, Bundler, NuGet, Docker, GitHub Actions, …).
 - **osv-scanner** reads lockfiles of all major ecosystems.
+- **Trivy** misconfiguration checks cover Dockerfile, Docker Compose, Kubernetes, Helm, Terraform, CloudFormation and Ansible.
 - **semgrep** rulesets are configurable globally (`SEMGREP_CONFIGS`) or per repo (`semgrep_configs`), e.g. `p/php`, `p/python`, `p/javascript`, `p/golang`, `p/java`. See the [registry](https://semgrep.dev/explore).
 - **AI fixes** can edit code in any language. To *run* tooling (upgrade a dependency, run tests), the toolchain has to be in the watcher image. Out of the box it includes Node (npm/yarn/pnpm), PHP (composer) and Python (pip). Extend `watcher/Dockerfile` for other stacks and allow the commands via `ai_allowed_commands`.
 
@@ -45,6 +59,12 @@ cp repos.example.json repos.json
 | `semgrep_configs` | `SEMGREP_CONFIGS` env | list of semgrep rulesets |
 | `semgrep_severity` | `["ERROR"]` | add `"WARNING"` for more findings |
 | `ai_allowed_commands` | `[]` | extra shell commands the AI may run, e.g. `["pytest", "go"]` |
+| `ai_language` | `AI_LANGUAGE` env | language of AI-written PR descriptions for this repo, e.g. `"Czech"` |
+| `trivy_fs` | `true` | Trivy filesystem scan (misconfigurations + secrets) |
+| `trivy_fs_scanners` | `["misconfig", "secret"]` | add `"vuln"` / `"license"` if you want them from Trivy too |
+| `trivy_images` | `[]` | published images to scan, e.g. `["ghcr.io/me/app:latest"]` |
+| `trivy_severity` | `["HIGH", "CRITICAL"]` | minimum Trivy severities |
+| `trivy_ignore_unfixed` | `false` | skip image vulnerabilities without an available fix |
 | `max_new_issues_per_run` | `10` | protects against an issue flood on the first scan |
 | `max_ai_fixes_per_run` | `2` | caps AI cost per run |
 | `notify` | `true` | set `false` to mute notifications for this repo |
@@ -145,8 +165,9 @@ The tool versions pinned in the watcher (semgrep, osv-scanner, Claude Code, base
 | `GITHUB_TOKEN` | – | required |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | – | required for AI fixes |
 | `CLAUDE_MODEL` | Claude Code default | model for AI fixes |
-| `AI_LANGUAGE` | `English` | language of AI-written summaries |
-| `SEMGREP_CONFIGS` | `p/default,p/secrets` | comma-separated rulesets |
+| `AI_LANGUAGE` | `English` | default language of AI-written summaries (per repo: `ai_language`) |
+| `SEMGREP_CONFIGS` | `p/default` | comma-separated rulesets |
+| `TRIVY_USERNAME` / `TRIVY_PASSWORD` | – | registry login for private images |
 | `SCAN_INTERVAL_HOURS` | `24` | how often to scan |
 | `LOOP_MINUTES` | `15` | how often to check for `ai-fix` labels |
 | `RENOVATE_INTERVAL_SECONDS` | `3600` | pause between Renovate runs |
@@ -161,6 +182,7 @@ The tool versions pinned in the watcher (semgrep, osv-scanner, Claude Code, base
 
 - The AI runs inside the container **without** the GitHub token. It can only read and edit files and run allow-listed commands. The wrapper does the commit and push.
 - Scanner output is passed to the AI explicitly as data, not instructions. AI fixes are still meant for repositories you trust.
+- Secrets are reported redacted, and AI never auto-fixes them or image findings (rotation and rebuilds need a human; the `ai-fix` label still forces an attempt).
 - Code snippets of secret-type findings are not copied into issues. A leaked credential has to be **revoked**; removing it from the code is not enough.
 - `.env` and `repos.json` are git-ignored.
 

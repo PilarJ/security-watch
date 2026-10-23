@@ -65,7 +65,48 @@ DEFAULTS = {
     "ai_allowed_commands": [],
     "max_new_issues_per_run": 10,
     "max_ai_fixes_per_run": 2,
+    "ai_language": None,             # None -> AI_LANGUAGE env -> English
+    "trivy_fs": True,                # Trivy filesystem scan: IaC misconfigurations + secrets
+    "trivy_fs_scanners": ["misconfig", "secret"],
+    "trivy_images": [],              # container images to scan, e.g. ["ghcr.io/owner/app:latest"]
+    "trivy_severity": ["HIGH", "CRITICAL"],
+    "trivy_ignore_unfixed": False,
 }
+
+TRIVY_CACHE = os.environ.get("TRIVY_CACHE_DIR") or os.path.join(STATE_DIR, "trivy-cache")
+TRIVY_SKIP_DIRS = ["vendor", "node_modules", ".git", "var/cache"]
+
+
+def rating(score):
+    """CVSS base score -> qualitative rating (CVSS v3 scale)."""
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low" if score > 0 else "unknown"
+
+
+def cvss_tag(score, fallback_severity=None):
+    if score:
+        return f"[CVSS {score:.1f} {rating(score)}]"
+    if fallback_severity:
+        return f"[{fallback_severity.lower()}]"
+    return "[CVSS n/a]"
+
+
+SEMGREP_LEVEL = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
+
+
+def fmt_fixed(versions, limit=6):
+    """Naturally sorted, de-duplicated list of fixed versions, truncated."""
+    def key(v):
+        return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", v.lstrip("v"))]
+    vs = sorted(set(versions), key=key)
+    if not vs:
+        return "no fix available yet"
+    return ", ".join(vs[:limit]) + (f" (+{len(vs) - limit} more)" if len(vs) > limit else "")
 
 
 def log(msg):
@@ -160,7 +201,7 @@ def env_int(name, default):
 
 
 def default_semgrep_configs():
-    raw = os.environ.get("SEMGREP_CONFIGS") or "p/default,p/secrets"
+    raw = os.environ.get("SEMGREP_CONFIGS") or "p/default"
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
@@ -307,12 +348,12 @@ def scan_osv(path):
                 details.append((v["id"], aliases, v.get("summary") or ""))
             name, eco, ver = info.get("name"), info.get("ecosystem"), info.get("version")
             sev = f"CVSS {max_sev:.1f}" if max_sev else "not specified"
-            title = f"Vulnerable dependency {name} {ver} ({', '.join(ids[:3])}{'…' if len(ids) > 3 else ''})"
+            title = f"{cvss_tag(max_sev)} Vulnerable dependency {name} {ver} ({', '.join(ids[:3])}{'…' if len(ids) > 3 else ''})"
             lines = [
                 f"**Package:** `{name}` `{ver}` ({eco})",
                 f"**Lockfile:** `{src}`",
                 f"**Severity:** {sev}",
-                f"**Fixed in:** {', '.join(sorted(fixed)) or 'no fix available yet'}",
+                f"**Fixed in:** {fmt_fixed(fixed)}",
                 "",
                 "| ID | CVE | Summary |",
                 "|---|---|---|",
@@ -389,11 +430,142 @@ def scan_semgrep(path, configs, severities):
             "tool": "semgrep",
             "kind": "code",
             "fp": fingerprint("semgrep", rule, rel, norm or str(start)),
-            "title": f"{short_rule} in {rel}:{start}",
+            "title": f"[{SEMGREP_LEVEL.get(extra.get('severity', ''), 'unknown')}] {short_rule} in {rel}:{start}",
             "body": "\n".join(lines),
             "path": rel,
             "line": start,
         })
+    return True, findings
+
+
+def _trivy(args, timeout=1800):
+    os.makedirs(TRIVY_CACHE, exist_ok=True)
+    p = run(["trivy", *args, "--format", "json", "--quiet", "--cache-dir", TRIVY_CACHE], timeout=timeout)
+    if p.returncode != 0:
+        log(f"  trivy failed ({p.returncode}): {p.stderr[-400:]}")
+        return None
+    try:
+        return json.loads(p.stdout or "{}")
+    except json.JSONDecodeError:
+        log("  trivy: unreadable output")
+        return None
+
+
+def scan_trivy_fs(path, scanners, severities):
+    """IaC misconfigurations (Dockerfile, compose, k8s, Terraform, ...) and secrets."""
+    args = ["fs", "--scanners", ",".join(scanners), "--severity", ",".join(severities)]
+    for d in TRIVY_SKIP_DIRS:
+        args += ["--skip-dirs", d]
+    data = _trivy(args + [path])
+    if data is None:
+        return False, []
+    findings = []
+    for res in data.get("Results") or []:
+        target = res.get("Target", "")
+        for m in res.get("Misconfigurations") or []:
+            cause = m.get("CauseMetadata") or {}
+            line = cause.get("StartLine") or 0
+            refs = m.get("References") or ([m["PrimaryURL"]] if m.get("PrimaryURL") else [])
+            lines = [
+                f"**Check:** `{m.get('ID')}` {m.get('Title', '')}",
+                f"**File:** `{target}`" + (f" line {line}" if line else ""),
+                f"**Severity:** {m.get('Severity', '?')}",
+                "",
+                (m.get("Description") or "").strip(),
+                "",
+                f"**Problem:** {m.get('Message', '').strip()}",
+                f"**Fix:** {m.get('Resolution', '').strip()}",
+            ]
+            if refs:
+                lines += ["", "**References:** " + " · ".join(refs[:4])]
+            findings.append({
+                "tool": "trivyfs", "kind": "code",
+                "fp": fingerprint("trivyfs", m.get("ID", ""), target, m.get("Message", "")),
+                "title": f"[{m.get('Severity', 'unknown').lower()}] {m.get('Title', m.get('ID'))} in {target}",
+                "body": "\n".join(lines),
+                "path": target, "line": line or 1,
+            })
+        for sec in res.get("Secrets") or []:
+            line = sec.get("StartLine") or 0
+            lines = [
+                f"**Secret type:** {sec.get('Title', sec.get('RuleID'))} (`{sec.get('RuleID')}`)",
+                f"**File:** `{target}` line {line}",
+                f"**Severity:** {sec.get('Severity', '?')}",
+                "",
+                f"Redacted match: `{(sec.get('Match') or '').strip()[:200]}`",
+                "",
+                "**Revoke/rotate this credential** - removing it from the code is not enough, it stays in git history.",
+            ]
+            findings.append({
+                "tool": "trivysecret", "kind": "secret",
+                "fp": fingerprint("trivyfs-secret", sec.get("RuleID", ""), target, str(line)),
+                "title": f"[{sec.get('Severity', 'unknown').lower()}] Secret ({sec.get('Title', sec.get('RuleID'))}) in {target}:{line}",
+                "body": "\n".join(lines),
+                "path": target, "line": line or 1,
+            })
+    return True, findings
+
+
+def _best_cvss(v):
+    scores = []
+    for src in (v.get("CVSS") or {}).values():
+        for key in ("V3Score", "V40Score", "V2Score"):
+            if src.get(key):
+                scores.append(float(src[key]))
+                break
+    nvd = (v.get("CVSS") or {}).get("nvd", {})
+    return float(nvd.get("V3Score") or 0) or (max(scores) if scores else 0.0)
+
+
+def scan_trivy_image(ref, severities, ignore_unfixed=False):
+    """OS and language packages inside a published container image."""
+    args = ["image", "--scanners", "vuln", "--severity", ",".join(severities)]
+    if ignore_unfixed:
+        args.append("--ignore-unfixed")
+    data = _trivy(args + [ref], timeout=2400)
+    if data is None:
+        return False, []
+    findings = []
+    os_meta = (data.get("Metadata") or {}).get("OS") or {}
+    if os_meta.get("EOSL"):
+        findings.append({
+            "tool": "trivyimg", "kind": "image",
+            "fp": fingerprint("trivyimg-eosl", ref, os_meta.get("Family", ""), os_meta.get("Name", "")),
+            "title": f"[high] Image {ref} is based on an end-of-life OS ({os_meta.get('Family')} {os_meta.get('Name')})",
+            "body": (f"**Image:** `{ref}`\n**OS:** {os_meta.get('Family')} {os_meta.get('Name')}\n\n"
+                     "This OS release no longer receives security updates, so new vulnerabilities will not be fixed. "
+                     "Move the base image to a supported release."),
+        })
+    for res in data.get("Results") or []:
+        target, cls = res.get("Target", ""), res.get("Class", "")
+        by_pkg = {}
+        for v in res.get("Vulnerabilities") or []:
+            by_pkg.setdefault((v.get("PkgName"), v.get("InstalledVersion")), []).append(v)
+        for (pkg, ver), vulns in by_pkg.items():
+            ids = sorted({v["VulnerabilityID"] for v in vulns})
+            score = max(_best_cvss(v) for v in vulns)
+            worst = max((v.get("Severity", "") for v in vulns), key=lambda s: ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"].index(s) if s in ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"] else 0)
+            fixed = {fv.strip() for v in vulns for fv in (v.get("FixedVersion") or "").split(",") if fv.strip()}
+            lines = [
+                f"**Image:** `{ref}`",
+                f"**Layer target:** `{target}` ({cls})",
+                f"**Package:** `{pkg}` `{ver}`",
+                f"**Severity:** {worst}" + (f" · CVSS {score:.1f}" if score else ""),
+                f"**Fixed in:** {fmt_fixed(fixed)}",
+                "",
+                "| ID | Severity | CVSS | Title |",
+                "|---|---|---|---|",
+            ]
+            for v in sorted(vulns, key=lambda x: -_best_cvss(x)):
+                sc = _best_cvss(v)
+                lines.append(f"| [{v['VulnerabilityID']}]({v.get('PrimaryURL') or 'https://osv.dev/vulnerability/' + v['VulnerabilityID']}) | {v.get('Severity')} | {f'{sc:.1f}' if sc else '–'} | {(v.get('Title') or '').replace('|', '/')[:150]} |")
+            lines += ["", "Usually fixed by rebuilding the image on an updated base image (or bumping the package)."]
+            findings.append({
+                "tool": "trivyimg", "kind": "image",
+                "fp": fingerprint("trivyimg", ref, cls, pkg or "", ",".join(ids)),
+                "title": f"{cvss_tag(score, worst)} {pkg} {ver} in image {ref.split('/')[-1]} ({', '.join(ids[:2])}{'…' if len(ids) > 2 else ''})",
+                "body": "\n".join(lines),
+            })
     return True, findings
 
 
@@ -451,6 +623,11 @@ def sync_issues(gh, cfg, findings, ok_tools, sha):
             log(f"  + issue #{res.get('number')}: {f['title']}")
             n_created.append((f"#{res.get('number')} {f['title']}", res.get("html_url")))
             created += 1
+        elif it["state"] == "open":
+            want = f"[security] {f['title']}"[:250]
+            if it["title"] != want:
+                gh.patch(f"/repos/{repo}/issues/{it['number']}", {"title": want})
+                log(f"  ~ retitled #{it['number']}")
         elif it["state"] == "closed" and it.get("state_reason") != "not_planned":
             gh.patch(f"/repos/{repo}/issues/{it['number']}", {"state": "open"})
             gh.post(f"/repos/{repo}/issues/{it['number']}/comments",
@@ -487,15 +664,27 @@ def scan_repo(gh, cfg, token):
     try:
         path = os.path.join(work, "repo")
         sha, _ = clone(repo, token, path)
-        ok_osv, f_osv = scan_osv(path)
-        ok_sg, f_sg = scan_semgrep(path, cfg["semgrep_configs"] or default_semgrep_configs(), cfg["semgrep_severity"])
-        log(f"  osv: {len(f_osv)} findings{'' if ok_osv else ' (FAILED)'} · semgrep: {len(f_sg)} findings{'' if ok_sg else ' (FAILED)'}")
-        ok_tools = {t for t, ok in (("osv", ok_osv), ("semgrep", ok_sg)) if ok}
-        failed = [t for t, ok in (("osv-scanner", ok_osv), ("semgrep", ok_sg)) if not ok]
+        results = {}  # tool -> (ok, findings)
+        results["osv"] = scan_osv(path)
+        results["semgrep"] = scan_semgrep(path, cfg["semgrep_configs"] or default_semgrep_configs(), cfg["semgrep_severity"])
+        if cfg["trivy_fs"]:
+            results["trivyfs"] = scan_trivy_fs(path, cfg["trivy_fs_scanners"], cfg["trivy_severity"])
+        if cfg["trivy_images"]:
+            img_ok, img_f = True, []
+            for ref in cfg["trivy_images"]:
+                ok, f = scan_trivy_image(ref, cfg["trivy_severity"], cfg["trivy_ignore_unfixed"])
+                img_ok, img_f = img_ok and ok, img_f + f
+            results["trivyimg"] = (img_ok, img_f)
+        log("  " + " · ".join(f"{t}: {len(f)} findings{'' if ok else ' (FAILED)'}" for t, (ok, f) in results.items()))
+        ok_tools = {t for t, (ok, _) in results.items() if ok}
+        if "trivyfs" in ok_tools:
+            ok_tools.add("trivysecret")
+        failed = [t for t, (ok, _) in results.items() if not ok]
+        all_findings = [f for _, (_, fs) in results.items() for f in fs]
         if failed:
             NOTIFY.send("errors", cfg, f"⚠️ {repo}: {', '.join(failed)} failed - see watcher logs")
         ensure_labels(gh, repo)
-        sync_issues(gh, cfg, f_osv + f_sg, ok_tools, sha)
+        sync_issues(gh, cfg, all_findings, ok_tools, sha)
         return bool(ok_tools)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -548,6 +737,8 @@ def ai_candidates(gh, cfg):
         elif cfg["ai_fix"] == "auto" and LABEL_AI_FAILED not in names:
             if it["_tool"] == "osv" and not cfg["ai_fix_dependencies"]:
                 continue
+            if it["_tool"] in ("trivyimg", "trivysecret"):
+                continue  # image rebuilds and credential rotation need a human; use the ai-fix label to force
             out.append((1, it))
     out.sort(key=lambda x: (x[0], x[1]["number"]))
     return [it for _, it in out]
@@ -570,7 +761,7 @@ def ai_fix_issue(gh, cfg, token, issue, dry_run):
         run(["git", "checkout", "-q", "-b", branch], cwd=path, check=True)
 
         body = FP_RE.sub("", issue.get("body") or "").split("\n---\n")[0].strip()
-        prompt = AI_PROMPT.format(title=issue["title"], body=body, language=os.environ.get("AI_LANGUAGE") or "English")
+        prompt = AI_PROMPT.format(title=issue["title"], body=body, language=cfg.get("ai_language") or os.environ.get("AI_LANGUAGE") or "English")
         commands = AI_BASE_COMMANDS + list(cfg.get("ai_allowed_commands") or [])
         cmd = [
             "claude", "-p", prompt,
@@ -622,7 +813,7 @@ def ai_fix_issue(gh, cfg, token, issue, dry_run):
 
         name = os.environ.get("GIT_AUTHOR_NAME") or "security-watch"
         email = os.environ.get("GIT_AUTHOR_EMAIL") or "security-watch@users.noreply.github.com"
-        title = re.sub(r"^\[security\]\s*", "", issue["title"])
+        title = re.sub(r"^(\[[^\]]*\]\s*)+", "", issue["title"])
         msg = (f"fix(security): {title}\n\nCloses #{n}\n\n"
                "Co-Authored-By: Claude <noreply@anthropic.com>")
         run(["git", "add", "-A"], cwd=path, check=True)
@@ -737,6 +928,9 @@ def main():
     if args.scan_local:
         ok1, a = scan_osv(args.scan_local)
         ok2, b = scan_semgrep(args.scan_local, default_semgrep_configs(), DEFAULTS["semgrep_severity"])
+        ok3, c = scan_trivy_fs(args.scan_local, DEFAULTS["trivy_fs_scanners"], DEFAULTS["trivy_severity"])
+        b = b + c
+        ok2 = ok2 and ok3
         for f in a + b:
             print(f"- [{f['tool']}] {f['title']}  fp={f['fp']}")
         print(f"total {len(a) + len(b)} (osv ok={ok1}, semgrep ok={ok2})")
