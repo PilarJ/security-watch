@@ -76,6 +76,7 @@ Slack, Telegram, both or neither. Configure them in `.env`:
 | `ai_failed` | AI couldn't fix an issue | ✅ |
 | `renovate_security` | Renovate opened a new security update PR | ✅ |
 | `errors` | a scanner or the watcher failed | ✅ |
+| `self_update` | security-watch updated itself (see below) | ✅ |
 
 Choose events with `NOTIFY_EVENTS=new_findings,ai_pr` (or `all`). Mute a single repo with `"notify": false` in `repos.json`. Check the setup with:
 
@@ -120,8 +121,22 @@ Run `make` to list them.
 | `make renovate` | run Renovate once right now |
 | `make update` | `git pull`, pull new images, rebuild and restart |
 | `make autostart` | start Docker at boot (see above) |
+| `make autoupdate` / `make autoupdate-off` | install / remove the nightly self-update cron job |
+| `make self-update` | run the self-update now |
 
 Without `make`, the same works directly with Docker Compose, e.g. `docker compose run --rm watcher --scan-local /src` to scan a mounted local directory.
+
+### Keeping security-watch itself up to date
+
+`make autoupdate` installs a cron job (04:30 every night) that runs `scripts/self-update.sh`:
+
+1. fast-forwards this checkout to the latest commit (skipped if you have local changes or the branch diverged)
+2. pulls newer images and rebuilds the watcher with fresh base images
+3. recreates containers **only if something changed**, sends a `self_update` notification and logs to `state/self-update.log`
+
+The cron job runs as your user, so `git fetch` uses your normal Git credentials. For a private fork over HTTPS, run `gh auth setup-git` once.
+
+The tool versions pinned in the watcher (semgrep, osv-scanner, Claude Code, base images) are covered by this repo's `renovate.json`. Add your own copy of security-watch to `repos.json` and Renovate will open a grouped PR when a new version comes out. Merge it and the nightly self-update deploys it.
 
 ### Environment variables (`.env`)
 

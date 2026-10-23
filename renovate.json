@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "semgrep version pinned in the watcher Dockerfile",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": ["semgrep==(?<currentValue>[0-9][0-9.]*)"],
+      "depNameTemplate": "semgrep",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "description": "Claude Code version pinned in the watcher Dockerfile",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": ["@anthropic-ai/claude-code@(?<currentValue>[0-9][0-9.]*)"],
+      "depNameTemplate": "@anthropic-ai/claude-code",
+      "datasourceTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Tool bumps for security-watch itself: one grouped PR",
+      "matchFileNames": ["watcher/Dockerfile", "docker-compose.yml"],
+      "groupName": "security-watch tooling"
+    }
+  ]
+}

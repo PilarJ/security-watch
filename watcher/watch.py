@@ -74,8 +74,8 @@ def log(msg):
 
 # ---------------------------------------------------------------- notifications (optional)
 
-ALL_EVENTS = ["new_findings", "reopened", "resolved", "ai_pr", "ai_failed", "renovate_security", "errors"]
-DEFAULT_EVENTS = ["new_findings", "reopened", "ai_pr", "ai_failed", "renovate_security", "errors"]
+ALL_EVENTS = ["new_findings", "reopened", "resolved", "ai_pr", "ai_failed", "renovate_security", "errors", "self_update"]
+DEFAULT_EVENTS = ["new_findings", "reopened", "ai_pr", "ai_failed", "renovate_security", "errors", "self_update"]
 
 
 class Notifier:
@@ -713,8 +713,17 @@ def main():
     ap.add_argument("--repo", help="process only this repository")
     ap.add_argument("--scan-local", metavar="PATH", help="only scan a local directory and print findings")
     ap.add_argument("--test-notify", action="store_true", help="send a test notification and exit")
+    ap.add_argument("--notify-event", help="send a one-off notification for this event (used by scripts)")
+    ap.add_argument("--notify-text", default="", help="text of the one-off notification")
     args = ap.parse_args()
     NOTIFY.dry_run = args.dry_run
+
+    if args.notify_event:
+        lines = [l for l in args.notify_text.splitlines() if l.strip()]
+        titles = {"self_update": "🔄 security-watch updated itself"}
+        NOTIFY.send(args.notify_event, None, titles.get(args.notify_event, f"security-watch: {args.notify_event}"),
+                    [(l, None) for l in lines])
+        return
 
     if args.test_notify:
         if not NOTIFY.enabled:
