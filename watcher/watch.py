@@ -72,6 +72,86 @@ def log(msg):
     print(f"[{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
+# ---------------------------------------------------------------- notifications (optional)
+
+ALL_EVENTS = ["new_findings", "reopened", "resolved", "ai_pr", "ai_failed", "renovate_security", "errors"]
+DEFAULT_EVENTS = ["new_findings", "reopened", "ai_pr", "ai_failed", "renovate_security", "errors"]
+
+
+class Notifier:
+    """Sends short messages to Slack (incoming webhook) and/or Telegram (bot). Both optional."""
+
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        self.slack = os.environ.get("SLACK_WEBHOOK_URL") or ""
+        self.tg_token = os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+        self.tg_chat = os.environ.get("TELEGRAM_CHAT_ID") or ""
+        self.tg_api = (os.environ.get("TELEGRAM_API_URL") or "https://api.telegram.org").rstrip("/")
+        raw = os.environ.get("NOTIFY_EVENTS")
+        self.events = {e.strip() for e in raw.split(",") if e.strip()} if raw else set(DEFAULT_EVENTS)
+        if "all" in self.events:
+            self.events = set(ALL_EVENTS)
+
+    @property
+    def enabled(self):
+        return bool(self.slack or (self.tg_token and self.tg_chat))
+
+    def send(self, event, cfg, title, items=(), more=0):
+        """title: plain text; items: list of (text, url or None)."""
+        if event not in self.events or (cfg is not None and cfg.get("notify") is False):
+            return
+        if not self.enabled and not self.dry_run:
+            return
+        if self.dry_run:
+            log(f"  [dry-run notify:{event}] {title} " + " | ".join(t for t, _ in items))
+            return
+        if self.slack:
+            self._post(self.slack, {"text": self._slack(title, items, more), "unfurl_links": False})
+        if self.tg_token and self.tg_chat:
+            self._post(f"{self.tg_api}/bot{self.tg_token}/sendMessage", {
+                "chat_id": self.tg_chat,
+                "text": self._telegram(title, items, more),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            })
+
+    @staticmethod
+    def _slack(title, items, more):
+        esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+        lines = [f"*{esc(title)}*"]
+        lines += [f"• <{u}|{esc(t)}>" if u else f"• {esc(t)}" for t, u in items]
+        if more:
+            lines.append(f"…and {more} more")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _telegram(title, items, more):
+        esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+        lines = [f"<b>{esc(title)}</b>"]
+        lines += [f'• <a href="{esc(u)}">{esc(t)}</a>' if u else f"• {esc(t)}" for t, u in items]
+        if more:
+            lines.append(f"…and {more} more")
+        return "\n".join(lines)[:4000]
+
+    @staticmethod
+    def _post(url, data):
+        req = urllib.request.Request(url, data=json.dumps(data).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "security-watch"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except Exception as e:  # noqa: BLE001 - notifications must never break the watcher
+            host = urllib.parse.urlparse(url).netloc
+            log(f"  notification to {host} failed: {getattr(e, 'code', '')} {str(e)[:200]}")
+
+
+NOTIFY = Notifier()
+
+
+def notify_list(event, cfg, title, items, limit=10):
+    NOTIFY.send(event, cfg, title, items[:limit], more=max(0, len(items) - limit))
+
+
 def env_int(name, default):
     try:
         return int(os.environ.get(name) or default)
@@ -355,6 +435,7 @@ def sync_issues(gh, cfg, findings, ok_tools, sha):
     issues = existing_issues(gh, repo)
     current = {f["fp"]: f for f in findings}
     created = reopened = closed = 0
+    n_created, n_reopened, n_closed = [], [], []
     limit = cfg["max_new_issues_per_run"]
 
     for fp, f in current.items():
@@ -368,12 +449,14 @@ def sync_issues(gh, cfg, findings, ok_tools, sha):
                 "labels": [LABEL],
             })
             log(f"  + issue #{res.get('number')}: {f['title']}")
+            n_created.append((f"#{res.get('number')} {f['title']}", res.get("html_url")))
             created += 1
         elif it["state"] == "closed" and it.get("state_reason") != "not_planned":
             gh.patch(f"/repos/{repo}/issues/{it['number']}", {"state": "open"})
             gh.post(f"/repos/{repo}/issues/{it['number']}/comments",
                     {"body": f"🔁 The finding reappeared in the scan of commit `{sha[:7]}` - reopening."})
             log(f"  ↺ reopened #{it['number']}")
+            n_reopened.append((f"#{it['number']} {it['title']}", it.get("html_url")))
             reopened += 1
 
     for fp, it in issues.items():
@@ -382,11 +465,19 @@ def sync_issues(gh, cfg, findings, ok_tools, sha):
                     {"body": f"✅ No longer found in the scan of commit `{sha[:7]}` (fixed or superseded by a newer finding) - closing."})
             gh.patch(f"/repos/{repo}/issues/{it['number']}", {"state": "closed", "state_reason": "completed"})
             log(f"  ✓ closed #{it['number']}")
+            n_closed.append((f"#{it['number']} {it['title']}", it.get("html_url")))
             closed += 1
 
     skipped = max(0, sum(1 for fp in current if fp not in issues) - created)
     log(f"  issues: {created} new, {reopened} reopened, {closed} closed"
         + (f", {skipped} deferred to the next run (limit {limit})" if skipped else ""))
+    if n_created:
+        notify_list("new_findings", cfg, f"🔐 {repo}: {len(n_created)} new security finding(s)"
+                    + (f" (+{skipped} deferred)" if skipped else ""), n_created)
+    if n_reopened:
+        notify_list("reopened", cfg, f"🔁 {repo}: {len(n_reopened)} finding(s) reappeared", n_reopened)
+    if n_closed:
+        notify_list("resolved", cfg, f"✅ {repo}: {len(n_closed)} finding(s) resolved", n_closed)
 
 
 def scan_repo(gh, cfg, token):
@@ -400,6 +491,9 @@ def scan_repo(gh, cfg, token):
         ok_sg, f_sg = scan_semgrep(path, cfg["semgrep_configs"] or default_semgrep_configs(), cfg["semgrep_severity"])
         log(f"  osv: {len(f_osv)} findings{'' if ok_osv else ' (FAILED)'} · semgrep: {len(f_sg)} findings{'' if ok_sg else ' (FAILED)'}")
         ok_tools = {t for t, ok in (("osv", ok_osv), ("semgrep", ok_sg)) if ok}
+        failed = [t for t, ok in (("osv-scanner", ok_osv), ("semgrep", ok_sg)) if not ok]
+        if failed:
+            NOTIFY.send("errors", cfg, f"⚠️ {repo}: {', '.join(failed)} failed - see watcher logs")
         ensure_labels(gh, repo)
         sync_issues(gh, cfg, f_osv + f_sg, ok_tools, sha)
         return bool(ok_tools)
@@ -517,6 +611,8 @@ def ai_fix_issue(gh, cfg, token, issue, dry_run):
             if LABEL_AI_FIX in names:
                 gh.delete(f"/repos/{repo}/issues/{n}/labels/{LABEL_AI_FIX}")
             log(f"  no change - labelled {LABEL_AI_FAILED}")
+            NOTIFY.send("ai_failed", cfg, f"🤖 {repo}: AI could not fix #{n}{cost}",
+                        [(issue["title"], issue.get("html_url"))])
             return
 
         stat = run(["git", "diff", "--stat", "HEAD"], cwd=path).stdout.strip()
@@ -551,6 +647,8 @@ def ai_fix_issue(gh, cfg, token, issue, dry_run):
                 gh.delete(f"/repos/{repo}/issues/{n}/labels/{lbl}")
         gh.post(f"/repos/{repo}/issues/{n}/comments", {"body": f"🤖 AI opened a pull request with a fix: #{pr['number']}{cost}"})
         log(f"  PR #{pr['number']} opened{cost}")
+        NOTIFY.send("ai_pr", cfg, f"🤖 {repo}: AI opened a fix PR #{pr['number']} - review needed{cost}",
+                    [(f"fix(security): {title}"[:200], pr.get("html_url"))])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -566,6 +664,23 @@ def ai_pass(gh, cfg, token, dry_run):
             ai_fix_issue(gh, cfg, token, issue, dry_run)
         except Exception as e:  # noqa: BLE001
             log(f"  AI fix #{issue['number']} failed: {e}")
+
+
+def renovate_security_pass(gh, cfg, state, dry_run):
+    """Notify about new Renovate security PRs (Renovate itself doesn't notify anywhere)."""
+    if not cfg["renovate"] or "renovate_security" not in NOTIFY.events or not (NOTIFY.enabled or dry_run):
+        return
+    repo = cfg["repo"]
+    prs = [it for it in gh.get_all(f"/repos/{repo}/issues?state=open&labels=security") if "pull_request" in it]
+    seen = set(state.get(repo, {}).get("notified_prs", []))
+    new = [p for p in prs if p["number"] not in seen]
+    if new:
+        notify_list("renovate_security", cfg, f"🛡️ {repo}: {len(new)} security update PR(s) from Renovate",
+                    [(f"#{p['number']} {p['title']}", p.get("html_url")) for p in new])
+    if not dry_run:
+        open_numbers = {p["number"] for p in prs}
+        state.setdefault(repo, {})["notified_prs"] = sorted(open_numbers | (seen & open_numbers))
+        save_state(state)
 
 
 # ---------------------------------------------------------------- main loop
@@ -584,8 +699,10 @@ def one_pass(gh, token, args, state):
                         state.setdefault(repo, {})["last_scan"] = time.time()
                         save_state(state)
             ai_pass(gh, cfg, token, args.dry_run)
+            renovate_security_pass(gh, cfg, state, args.dry_run)
         except Exception as e:  # noqa: BLE001
             log(f"ERROR {repo}: {e}")
+            NOTIFY.send("errors", cfg, f"⚠️ {repo}: watcher error", [(str(e)[:300], None)])
 
 
 def main():
@@ -595,7 +712,18 @@ def main():
     ap.add_argument("--force-scan", action="store_true", help="scan now regardless of the interval")
     ap.add_argument("--repo", help="process only this repository")
     ap.add_argument("--scan-local", metavar="PATH", help="only scan a local directory and print findings")
+    ap.add_argument("--test-notify", action="store_true", help="send a test notification and exit")
     args = ap.parse_args()
+    NOTIFY.dry_run = args.dry_run
+
+    if args.test_notify:
+        if not NOTIFY.enabled:
+            sys.exit("No notification channel configured (SLACK_WEBHOOK_URL or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)")
+        NOTIFY.events.add("test")
+        NOTIFY.send("test", None, "👋 security-watch test notification",
+                    [("Notifications are working", "https://github.com")])
+        log("test notification sent")
+        return
 
     if args.scan_local:
         ok1, a = scan_osv(args.scan_local)
@@ -611,6 +739,8 @@ def main():
     gh = GitHub(token, dry_run=args.dry_run)
     login = gh.get("/user")["login"]
     log(f"security-watch started (GitHub: {login}, repos: {REPOS_FILE})")
+    channels = [c for c, on in (("Slack", NOTIFY.slack), ("Telegram", NOTIFY.tg_token and NOTIFY.tg_chat)) if on]
+    log(f"notifications: {', '.join(channels) or 'off'}" + (f" (events: {', '.join(sorted(NOTIFY.events))})" if channels else ""))
 
     state = load_state()
     loop = env_int("LOOP_MINUTES", 15) * 60

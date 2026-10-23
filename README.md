@@ -11,6 +11,8 @@ Runs as two Docker containers on any machine (a home server, a Mac mini, a VPS).
 
 AI never merges anything. Every PR goes through your review.
 
+Optional **Slack** and **Telegram** notifications tell you when something needs attention.
+
 ## Supported stacks
 
 - **Renovate** supports 90+ package managers (npm, composer, pip/poetry, Go modules, Maven/Gradle, Cargo, Bundler, NuGet, Docker, GitHub Actions, …).
@@ -45,6 +47,7 @@ cp repos.example.json repos.json
 | `ai_allowed_commands` | `[]` | extra shell commands the AI may run, e.g. `["pytest", "go"]` |
 | `max_new_issues_per_run` | `10` | protects against an issue flood on the first scan |
 | `max_ai_fixes_per_run` | `2` | caps AI cost per run |
+| `notify` | `true` | set `false` to mute notifications for this repo |
 
 Changes to `repos.json` are picked up without a restart.
 
@@ -54,6 +57,33 @@ Changes to `repos.json` are picked up without a restart.
 - `ai-pr-opened`: AI opened a PR (the PR contains `Closes #…`, so merging closes the issue)
 - `ai-failed`: AI made no change; the reason is in a comment
 - Closing an issue as **Not planned** marks the finding as ignored (false positive)
+
+## Notifications
+
+Slack, Telegram, both or neither. Configure them in `.env`:
+
+| Channel | Setup |
+|---|---|
+| Slack | Create an [Incoming Webhook](https://api.slack.com/messaging/webhooks) for a channel and set `SLACK_WEBHOOK_URL`. |
+| Telegram | Create a bot with [@BotFather](https://t.me/BotFather) and set `TELEGRAM_BOT_TOKEN`. Send the bot a message (or add it to a group), open `https://api.telegram.org/bot<TOKEN>/getUpdates` and set `TELEGRAM_CHAT_ID` to the `chat.id` value. |
+
+| Event | Sent when | Default |
+|---|---|---|
+| `new_findings` | the scan opened new issues (one message per repo, with links) | ✅ |
+| `reopened` | a previously fixed finding came back | ✅ |
+| `resolved` | findings disappeared and their issues were closed | – |
+| `ai_pr` | AI opened a fix PR that needs review | ✅ |
+| `ai_failed` | AI couldn't fix an issue | ✅ |
+| `renovate_security` | Renovate opened a new security update PR | ✅ |
+| `errors` | a scanner or the watcher failed | ✅ |
+
+Choose events with `NOTIFY_EVENTS=new_findings,ai_pr` (or `all`). Mute a single repo with `"notify": false` in `repos.json`. Check the setup with:
+
+```bash
+docker compose run --rm watcher --test-notify
+```
+
+There is no separate dashboard. GitHub is the dashboard: filter issues by the `security-watch` label, and Renovate keeps a *Dependency Dashboard* issue in every repo.
 
 ## Setup
 
@@ -105,6 +135,9 @@ docker compose pull && docker compose up -d --build
 | `RENOVATE_TIMEZONE` | `UTC` | timezone for the Renovate schedule |
 | `CLAUDE_TIMEOUT_SECONDS` | `1800` | max duration of one AI fix |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `security-watch` | author of AI fix commits |
+| `SLACK_WEBHOOK_URL` | – | Slack notifications |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | – | Telegram notifications |
+| `NOTIFY_EVENTS` | all except `resolved` | which events to send |
 
 ## Security notes
 
