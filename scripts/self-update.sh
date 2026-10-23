@@ -56,4 +56,5 @@ if [ ${#changes[@]} -gt 0 ]; then
 else
   echo "nothing to update"
 fi
-$COMPOSE image prune -f >/dev/null 2>&1 || true
+# Each `build --pull` leaves the previous watcher image dangling - drop them so the disk does not fill up.
+docker image prune -f >/dev/null 2>&1 || true

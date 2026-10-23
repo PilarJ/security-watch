@@ -68,6 +68,7 @@ cp repos.example.json repos.json
 | `max_new_issues_per_run` | `10` | protects against an issue flood on the first scan |
 | `max_ai_fixes_per_run` | `2` | caps AI cost per run |
 | `notify` | `true` | set `false` to mute notifications for this repo |
+| `renovate_config` | `{}` | extra Renovate config for this repo only, e.g. `{"constraints": {"php": "8.2.*"}}` when `require.php` is open-ended and lock files must be generated with the PHP version you actually run |
 
 Changes to `repos.json` are picked up without a restart.
 

@@ -6,7 +6,10 @@ const { repos } = JSON.parse(fs.readFileSync('/config/repos.json', 'utf8'));
 
 module.exports = {
   platform: 'github',
-  repositories: repos.filter((r) => r.renovate !== false).map((r) => r.repo),
+  // A repo with `renovate_config` becomes a repository object, so the extra config applies only to it.
+  repositories: repos
+    .filter((r) => r.renovate !== false)
+    .map((r) => (r.renovate_config ? { repository: r.repo, ...r.renovate_config } : r.repo)),
 
   // Repositories don't need their own renovate.json - this config is enough.
   // If a repository has one, its settings take precedence.
