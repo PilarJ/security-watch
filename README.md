@@ -93,32 +93,35 @@ There is no separate dashboard. GitHub is the dashboard: filter issues by the `s
 2. **Claude authentication** (only for AI fixes): `ANTHROPIC_API_KEY`, or run `claude setup-token` and put the result into `CLAUDE_CODE_OAUTH_TOKEN`.
 3. Start it:
    ```bash
-   cp .env.example .env              # fill it in
-   cp repos.example.json repos.json  # list your repositories
-   docker compose up -d --build
-   docker compose logs -f
+   make setup        # creates .env and repos.json from the examples - fill them in
+   make up           # build and start in the background
+   make autostart    # make sure Docker starts after a reboot
+   make logs
    ```
 
-Containers use `restart: unless-stopped`, so they come back after a reboot once Docker is running.
+Both containers use `restart: unless-stopped`, so they come back after a crash or a reboot once the Docker daemon is running. `make autostart` handles that per OS:
 
-### Useful commands
+- **Linux:** enables the `docker` systemd service at boot.
+- **macOS:** Docker Desktop only runs while a user is logged in. Enable *Start Docker Desktop when you sign in* and, on a headless machine, automatic login. If Colima is installed, `make autostart` registers it with `brew services` instead.
 
-```bash
-# scan right now, without writing anything to GitHub
-docker compose run --rm watcher --once --force-scan --dry-run
+### Commands
 
-# real scan of a single repo right now
-docker compose run --rm watcher --once --force-scan --repo your-user/web-app
+Run `make` to list them.
 
-# scan a local directory (no GitHub needed)
-docker compose run --rm -v "$PWD/../my-project:/src:ro" watcher --scan-local /src
+| Command | |
+|---|---|
+| `make setup` | create `.env` and `repos.json` from the examples |
+| `make up` / `make down` / `make restart` | start / stop / recreate (after editing `.env`) |
+| `make logs` | follow logs (`SERVICE=watcher` or `SERVICE=renovate` to filter) |
+| `make status` | container status |
+| `make scan` | scan all repos now **without** writing to GitHub (dry run) |
+| `make scan-now` | real scan now (`REPO=owner/name` for one repo) |
+| `make test-notify` | send a test Slack/Telegram notification |
+| `make renovate` | run Renovate once right now |
+| `make update` | `git pull`, pull new images, rebuild and restart |
+| `make autostart` | start Docker at boot (see above) |
 
-# manual Renovate run
-docker compose run --rm renovate renovate
-
-# update tools
-docker compose pull && docker compose up -d --build
-```
+Without `make`, the same works directly with Docker Compose, e.g. `docker compose run --rm watcher --scan-local /src` to scan a mounted local directory.
 
 ### Environment variables (`.env`)
 

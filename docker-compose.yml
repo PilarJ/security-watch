@@ -1,10 +1,21 @@
 name: security-watch
 
+# Both services restart automatically - after a crash and after a reboot,
+# as long as the Docker daemon itself starts at boot (see `make autostart`).
+x-common: &common
+  restart: unless-stopped
+  env_file: .env
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   renovate:
+    <<: *common
     image: renovate/renovate:44
-    restart: unless-stopped
-    env_file: .env
     environment:
       RENOVATE_TOKEN: ${GITHUB_TOKEN}
       RENOVATE_CONFIG_FILE: /config/renovate/config.js
@@ -16,9 +27,8 @@ services:
     command: ["bash", "-c", "while true; do renovate; sleep $${RENOVATE_INTERVAL_SECONDS:-3600}; done"]
 
   watcher:
+    <<: *common
     build: ./watcher
-    restart: unless-stopped
-    env_file: .env
     volumes:
       - ./repos.json:/config/repos.json:ro
       - ./state:/state
