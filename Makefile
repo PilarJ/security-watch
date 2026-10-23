@@ -59,12 +59,12 @@ autostart: ## Make sure Docker (and therefore security-watch) starts after a reb
 	    sudo systemctl enable --now docker && echo "Done. Containers restart automatically (restart: unless-stopped)." ;; \
 	  Darwin) \
 	    if command -v colima >/dev/null 2>&1; then \
-	      brew services start colima && echo "Colima starts at login; containers restart automatically."; \
+	      ./scripts/colima-autostart.sh; \
 	    else \
 	      echo "macOS: Docker runs inside Docker Desktop, which starts when a user logs in."; \
 	      echo "  1. Docker Desktop -> Settings -> General -> enable 'Start Docker Desktop when you sign in'"; \
 	      echo "  2. For a headless server: System Settings -> Users & Groups -> 'Automatically log in as' this user"; \
-	      echo "  (Alternative: brew install colima docker docker-compose && make autostart)"; \
+	      echo "  (Alternative: install colima + docker + docker-compose, then run make autostart again)"; \
 	    fi ;; \
 	  *) echo "Unknown OS - make sure the Docker daemon starts at boot." ;; \
 	esac

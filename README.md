@@ -103,7 +103,7 @@ There is no separate dashboard. GitHub is the dashboard: filter issues by the `s
 Both containers use `restart: unless-stopped`, so they come back after a crash or a reboot once the Docker daemon is running. `make autostart` handles that per OS:
 
 - **Linux:** enables the `docker` systemd service at boot.
-- **macOS:** Docker Desktop only runs while a user is logged in. Enable *Start Docker Desktop when you sign in* and, on a headless machine, automatic login. If Colima is installed, `make autostart` registers it with `brew services` instead.
+- **macOS:** Docker Desktop only runs while a user is logged in. Enable *Start Docker Desktop when you sign in* and, on a headless machine, automatic login. If Colima is installed, `make autostart` installs a LaunchAgent for the current user instead (no `brew services`, so it also works when Homebrew belongs to a different admin account); on a headless machine enable automatic login for that user.
 
 ### Commands
 
