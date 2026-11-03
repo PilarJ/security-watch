@@ -71,6 +71,7 @@ DEFAULTS = {
     "trivy_images": [],              # container images to scan, e.g. ["ghcr.io/owner/app:latest"]
     "trivy_severity": ["HIGH", "CRITICAL"],
     "trivy_ignore_unfixed": False,
+    "exclude_paths": [],             # repo-relative dirs/files whose findings are dropped, e.g. ["legacy"]
 }
 
 TRIVY_CACHE = os.environ.get("TRIVY_CACHE_DIR") or os.path.join(STATE_DIR, "trivy-cache")
@@ -367,8 +368,26 @@ def scan_osv(path):
                 "fp": fingerprint("osv", src, eco or "", name or "", ",".join(ids)),
                 "title": title,
                 "body": "\n".join(lines),
+                "lockfile": src,
             })
     return True, findings
+
+
+def is_excluded(rel_path, exclude_paths):
+    """True if a repo-relative path is one of exclude_paths or lies inside one of them (anchored at the repo root)."""
+    if not rel_path:
+        return False
+    rel = os.path.normpath(rel_path)
+    for p in exclude_paths:
+        p = os.path.normpath(p)
+        if rel == p or rel.startswith(p + "/"):
+            return True
+    return False
+
+
+def filter_excluded(findings, exclude_paths):
+    """Drop findings located in exclude_paths. Findings without a file (container images) are kept."""
+    return [f for f in findings if not is_excluded(f.get("path") or f.get("lockfile"), exclude_paths)]
 
 
 def _snippet(path, rel, start, end):
@@ -680,7 +699,7 @@ def scan_repo(gh, cfg, token):
         if "trivyfs" in ok_tools:
             ok_tools.add("trivysecret")
         failed = [t for t, (ok, _) in results.items() if not ok]
-        all_findings = [f for _, (_, fs) in results.items() for f in fs]
+        all_findings = filter_excluded([f for _, (_, fs) in results.items() for f in fs], cfg["exclude_paths"])
         if failed:
             NOTIFY.send("errors", cfg, f"⚠️ {repo}: {', '.join(failed)} failed - see watcher logs")
         ensure_labels(gh, repo)

@@ -65,6 +65,7 @@ cp repos.example.json repos.json
 | `trivy_images` | `[]` | published images to scan, e.g. `["ghcr.io/me/app:latest"]` |
 | `trivy_severity` | `["HIGH", "CRITICAL"]` | minimum Trivy severities |
 | `trivy_ignore_unfixed` | `false` | skip image vulnerabilities without an available fix |
+| `exclude_paths` | `[]` | repo-relative directories/files to ignore, e.g. `["old-eshop"]` for a legacy snapshot kept only for reference; matched from the repo root. Open issues for findings there get closed on the next scan. Renovate is separate: add `"renovate_config": {"ignorePaths": [...]}` too |
 | `max_new_issues_per_run` | `10` | protects against an issue flood on the first scan |
 | `max_ai_fixes_per_run` | `2` | caps AI cost per run |
 | `notify` | `true` | set `false` to mute notifications for this repo |
